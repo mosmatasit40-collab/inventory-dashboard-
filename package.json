@@ -14,7 +14,7 @@
     "recharts": "^2.12.7",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.1/xlsx-0.20.1.tgz",
     "papaparse": "^5.4.1",
-    "lucide-react": "^0.383.0"
+    "lucide-react": "^0.383.0",
     "@supabase/supabase-js": "^2.45.4"
   },
   "devDependencies": {
