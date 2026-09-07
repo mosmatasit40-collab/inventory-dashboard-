@@ -24,6 +24,7 @@ import {
   Trash2,
   ChevronRight,
   BoxSelect,
+  Download,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------------- */
@@ -583,6 +584,48 @@ export default function InventoryDashboard() {
   const clockStr = now.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const dateStr = now.toLocaleDateString("th-TH", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 
+  /* ------------------------------- export to Excel ------------------------------- */
+  // Exports two sheets: a per-SKU total summary, and the full (unlimited, filtered)
+  // transaction log matching whatever search/filter is currently applied on screen.
+  const exportExcel = useCallback(() => {
+    const filteredForExport = [...transactions]
+      .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.id - a.id))
+      .filter((t) => !txSearch || t.sku.toLowerCase().includes(txSearch.toLowerCase()) || t.name.toLowerCase().includes(txSearch.toLowerCase()))
+      .filter((t) => {
+        if (txFilter === "in") return Number(t.in) > 0;
+        if (txFilter === "out") return Number(t.out) > 0;
+        return true;
+      });
+
+    const txRows = filteredForExport.map((t) => ({
+      วันที่: t.date,
+      รหัสสินค้า: t.sku,
+      ชื่อสินค้า: t.name,
+      หน่วย: t.unit,
+      รับเข้า: t.in || 0,
+      เบิกจ่าย: t.out || 0,
+      หมายเหตุ: t.note || "",
+    }));
+
+    const summaryMap = {};
+    transactions.forEach((t) => {
+      if (!summaryMap[t.sku]) {
+        summaryMap[t.sku] = { รหัสสินค้า: t.sku, ชื่อสินค้า: t.name, หน่วย: t.unit, รับเข้ารวม: 0, เบิกจ่ายรวม: 0 };
+      }
+      summaryMap[t.sku].รับเข้ารวม += Number(t.in) || 0;
+      summaryMap[t.sku].เบิกจ่ายรวม += Number(t.out) || 0;
+    });
+    const summaryRows = Object.values(summaryMap).map((s) => ({
+      ...s,
+      คงเหลือปัจจุบัน: products[s.รหัสสินค้า]?.stock ?? "",
+    }));
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "สรุปตามสินค้า");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(txRows), "ประวัติรับ-จ่าย");
+    XLSX.writeFile(wb, `รายงานรับจ่าย_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  }, [transactions, products, txSearch, txFilter]);
+
   /* ------------------------------- render ------------------------------- */
   return (
     <div
@@ -826,9 +869,30 @@ export default function InventoryDashboard() {
                     </FilterChip>
                   </div>
                 </div>
-                <span style={{ color: COLORS.faint, fontSize: 12.5, whiteSpace: "nowrap" }}>
-                  แสดง {recentTx.length.toLocaleString("th-TH")} จาก {transactions.length.toLocaleString("th-TH")} รายการ
-                </span>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <span style={{ color: COLORS.faint, fontSize: 12.5, whiteSpace: "nowrap" }}>
+                    แสดง {recentTx.length.toLocaleString("th-TH")} จาก {transactions.length.toLocaleString("th-TH")} รายการ
+                  </span>
+                  <button
+                    onClick={exportExcel}
+                    style={{
+                      background: COLORS.surface2,
+                      color: COLORS.text,
+                      border: `1px solid ${COLORS.border}`,
+                      borderRadius: 8,
+                      padding: "8px 14px",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 7,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    <Download size={14} color={COLORS.accent} /> ส่งออก Excel
+                  </button>
+                </div>
               </div>
               <div style={{ overflowX: "auto", maxHeight: 460, overflowY: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
