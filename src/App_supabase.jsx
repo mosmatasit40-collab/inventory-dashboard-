@@ -135,20 +135,36 @@ function metricsFor(product, transactions, horizon = 30) {
 
   const leadTimeDays = Number(product.leadTimeDays) || 3;
   const safetyStock = Number(product.safetyStock) || 0;
+
+  // confirmed, 100%-reliable numbers from the ERP (not statistical estimates):
+  //   incomingPO  = quantity already on a purchase order, due to arrive
+  //   reservedOut = quantity already reserved / committed to be issued out soon
+  const incomingPO = Number(product.incomingPO) || 0;
+  const reservedOut = Number(product.reservedOut) || 0;
+
+  // net position once every confirmed PO arrives and every confirmed reservation ships —
+  // this is the most trustworthy "will we actually run out" check, since it isn't a guess.
+  const netAvailable = product.stock + incomingPO - reservedOut;
+
   const reorderPoint = avgDailyOut * leadTimeDays + safetyStock;
   const daysOfStockLeft = avgDailyOut > 0 ? product.stock / avgDailyOut : Infinity;
   const forecastDemand = avgDailyOut * (leadTimeDays + REVIEW_DAYS);
-  const suggestedQty = Math.max(0, Math.ceil(forecastDemand + safetyStock - product.stock));
-  const needsReorder = product.stock <= reorderPoint;
+  // demand to plan against = whichever is larger: the statistical forecast, or the
+  // amount already confirmed as reserved (a confirmed reservation is a demand floor).
+  const planningDemand = Math.max(forecastDemand, reservedOut);
+  const suggestedQty = Math.max(0, Math.ceil(planningDemand + safetyStock - product.stock - incomingPO));
+  const needsReorder = netAvailable <= reorderPoint;
 
-  // explicit forward-looking projection over the selected horizon (e.g. next 7 / 14 / 30 days)
+  // explicit forward-looking projection over the selected horizon (e.g. next 7 / 14 / 30 days),
+  // now netted against confirmed incoming/outgoing rather than raw stock alone
   const forecastQtyHorizon = Math.round(avgDailyOut * horizon);
-  const projectedStockAtHorizon = Math.round(product.stock - forecastQtyHorizon);
+  const demandForHorizon = Math.max(forecastQtyHorizon, reservedOut);
+  const projectedStockAtHorizon = Math.round(product.stock + incomingPO - demandForHorizon);
   const stockOutInDays = avgDailyOut > 0 ? Math.max(0, Math.floor(product.stock / avgDailyOut)) : null;
 
   let status = "ปกติ";
-  if (product.stock <= safetyStock) status = "วิกฤต";
-  else if (needsReorder) status = "ควรสั่งซื้อ";
+  if (netAvailable <= 0) status = "วิกฤต";
+  else if (netAvailable <= safetyStock || needsReorder) status = "ควรสั่งซื้อ";
 
   return {
     avgDailyOut,
@@ -160,6 +176,9 @@ function metricsFor(product, transactions, horizon = 30) {
     forecastQtyHorizon,
     projectedStockAtHorizon,
     stockOutInDays,
+    incomingPO,
+    reservedOut,
+    netAvailable,
   };
 }
 
@@ -373,6 +392,9 @@ export default function InventoryDashboard() {
   const SKU_KEYS = ["sku", "รหัสสินค้า", "code", "material number", "materialnumber", "material no", "part number", "item code"];
   const NAME_KEYS = ["name", "product", "ชื่อสินค้า", "productname", "material description", "materialdescription", "description", "item description"];
   const UNIT_KEYS = ["unit", "หน่วย", "basic unit of measure", "uom", "unit of measure"];
+  // confirmed (not statistically estimated) figures from the ERP:
+  const PO_KEYS = ["quantity on po(receive)", "quantity on po (receive)", "po qty", "poqty", "incoming po", "qty on po", "ยอดสั่งซื้อรอรับ"];
+  const RESERVED_KEYS = ["issue reserved quantity", "issuereservedquantity", "reserved qty", "reserved quantity", "ยอดจองจ่าย"];
 
   const getField = (raw, keys) => {
     for (const k of keys) {
@@ -401,14 +423,27 @@ export default function InventoryDashboard() {
       const hasQty = headers.some((h) => QTY_KEYS.includes(h));
       const snapshotMode = hasQty && !hasInOut;
 
-      const applyMasterFields = (sku, name, unit, leadTimeDays, safetyStock) => {
+      const applyMasterFields = (sku, name, unit, leadTimeDays, safetyStock, incomingPO, reservedOut) => {
         if (!p[sku]) {
-          p[sku] = { sku, name: name || sku, unit: unit || "ชิ้น", stock: 0, leadTimeDays: Number(leadTimeDays) || 3, safetyStock: Number(safetyStock) || 0 };
+          p[sku] = {
+            sku,
+            name: name || sku,
+            unit: unit || "ชิ้น",
+            stock: 0,
+            leadTimeDays: Number(leadTimeDays) || 3,
+            safetyStock: Number(safetyStock) || 0,
+            incomingPO: Number(incomingPO) || 0,
+            reservedOut: Number(reservedOut) || 0,
+          };
         } else {
           if (name) p[sku].name = name;
           if (unit) p[sku].unit = unit;
           if (leadTimeDays !== undefined) p[sku].leadTimeDays = Number(leadTimeDays);
           if (safetyStock !== undefined) p[sku].safetyStock = Number(safetyStock);
+          // these are live snapshot figures from the ERP — always overwrite with the
+          // latest known value on every import (default to 0 if the column is absent).
+          if (incomingPO !== undefined) p[sku].incomingPO = Number(incomingPO) || 0;
+          if (reservedOut !== undefined) p[sku].reservedOut = Number(reservedOut) || 0;
         }
       };
 
@@ -426,6 +461,8 @@ export default function InventoryDashboard() {
               quantity: Number(getField(raw, QTY_KEYS)),
               leadTimeDays: getField(raw, ["leadtimedays", "leadtime", "ระยะเวลาสั่งซื้อ"]),
               safetyStock: getField(raw, ["safetystock", "สต๊อกสำรอง"]),
+              incomingPO: getField(raw, PO_KEYS),
+              reservedOut: getField(raw, RESERVED_KEYS),
               note: getField(raw, ["note", "หมายเหตุ"]) || "",
             };
           })
@@ -439,14 +476,14 @@ export default function InventoryDashboard() {
         Object.entries(bySku).forEach(([sku, items]) => {
           items.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
           const first = items[0];
-          applyMasterFields(sku, first.name, first.unit, first.leadTimeDays, first.safetyStock);
+          applyMasterFields(sku, first.name, first.unit, first.leadTimeDays, first.safetyStock, first.incomingPO, first.reservedOut);
 
           let prevQty = p[sku].stock && p[sku].stock !== 0 ? Number(p[sku].stock) : null;
           // if the product already had a nonzero known stock, treat that as the baseline
           // before the very first row in this upload; otherwise the first row becomes
           // the opening balance (no in/out inferred for it).
           items.forEach((item) => {
-            applyMasterFields(sku, item.name, item.unit, item.leadTimeDays, item.safetyStock);
+            applyMasterFields(sku, item.name, item.unit, item.leadTimeDays, item.safetyStock, item.incomingPO, item.reservedOut);
             const qty = Number.isFinite(item.quantity) ? item.quantity : prevQty ?? 0;
 
             if (prevQty === null) {
@@ -489,9 +526,11 @@ export default function InventoryDashboard() {
         const outQty = Number(getField(raw, OUT_KEYS)) || 0;
         const leadTimeDays = getField(raw, ["leadtimedays", "leadtime", "ระยะเวลาสั่งซื้อ"]);
         const safetyStock = getField(raw, ["safetystock", "สต๊อกสำรอง"]);
+        const incomingPO = getField(raw, PO_KEYS);
+        const reservedOut = getField(raw, RESERVED_KEYS);
         const note = getField(raw, ["note", "หมายเหตุ"]) || "";
 
-        applyMasterFields(sku, name, unit, leadTimeDays, safetyStock);
+        applyMasterFields(sku, name, unit, leadTimeDays, safetyStock, incomingPO, reservedOut);
         p[sku].stock = Number(p[sku].stock || 0) + inQty - outQty;
 
         tx.push({ id: nextId++, date, sku, name: p[sku].name, unit: p[sku].unit, in: inQty, out: outQty, note });
@@ -615,10 +654,19 @@ export default function InventoryDashboard() {
       summaryMap[t.sku].รับเข้ารวม += Number(t.in) || 0;
       summaryMap[t.sku].เบิกจ่ายรวม += Number(t.out) || 0;
     });
-    const summaryRows = Object.values(summaryMap).map((s) => ({
-      ...s,
-      คงเหลือปัจจุบัน: products[s.รหัสสินค้า]?.stock ?? "",
-    }));
+    const summaryRows = Object.values(summaryMap).map((s) => {
+      const prod = products[s.รหัสสินค้า];
+      const stock = prod?.stock ?? 0;
+      const incomingPO = Number(prod?.incomingPO) || 0;
+      const reservedOut = Number(prod?.reservedOut) || 0;
+      return {
+        ...s,
+        คงเหลือปัจจุบัน: stock,
+        "PO กำลังเข้า": incomingPO,
+        จองไว้จะจ่าย: reservedOut,
+        "สุทธิ (ยืนยันแล้ว)": stock + incomingPO - reservedOut,
+      };
+    });
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "สรุปตามสินค้า");
@@ -774,8 +822,9 @@ export default function InventoryDashboard() {
                   gap: 12,
                 }}
               >
-                <div style={{ fontSize: 13, color: COLORS.muted, maxWidth: 480 }}>
-                  พยากรณ์ความต้องการล่วงหน้าจากยอดเบิกจ่ายเฉลี่ยย้อนหลัง {TREND_WINDOW} วัน คูณด้วยช่วงเวลาที่เลือก แล้วเทียบกับสต๊อกคงเหลือ
+                <div style={{ fontSize: 13, color: COLORS.muted, maxWidth: 560 }}>
+                  พยากรณ์ความต้องการล่วงหน้าจากยอดเบิกจ่ายเฉลี่ยย้อนหลัง {TREND_WINDOW} วัน ผสานกับ PO ที่กำลังจะเข้าและยอดที่จองไว้จะจ่าย
+                  (ข้อมูลยืนยันแล้ว 100% จากไฟล์นำเข้า) เพื่อเช็คว่าของที่มีบวกที่กำลังจะเข้าเพียงพอหรือไม่
                 </div>
                 <div style={{ display: "flex", gap: 6 }}>
                   {[7, 14, 30, 60].map((d) => (
@@ -792,6 +841,9 @@ export default function InventoryDashboard() {
                       {[
                         "สินค้า",
                         "คงเหลือ",
+                        "PO กำลังเข้า",
+                        "จองไว้จะจ่าย",
+                        "สุทธิ (ยืนยันแล้ว)",
                         "เฉลี่ย/วัน",
                         `พยากรณ์ความต้องการ ${horizon} วัน`,
                         `คาดว่าคงเหลือหลัง ${horizon} วัน`,
@@ -814,6 +866,15 @@ export default function InventoryDashboard() {
                         </td>
                         <td style={numTd}>
                           {p.stock.toLocaleString("th-TH")} {p.unit}
+                        </td>
+                        <td style={{ ...numTd, color: p.m.incomingPO > 0 ? COLORS.success : COLORS.faint }}>
+                          {p.m.incomingPO > 0 ? `+${p.m.incomingPO.toLocaleString("th-TH")}` : "-"}
+                        </td>
+                        <td style={{ ...numTd, color: p.m.reservedOut > 0 ? COLORS.warn : COLORS.faint }}>
+                          {p.m.reservedOut > 0 ? `-${p.m.reservedOut.toLocaleString("th-TH")}` : "-"}
+                        </td>
+                        <td style={{ ...numTd, color: p.m.netAvailable <= 0 ? COLORS.danger : COLORS.text, fontWeight: 700 }}>
+                          {p.m.netAvailable.toLocaleString("th-TH")} {p.unit}
                         </td>
                         <td style={numTd}>{p.m.avgDailyOut.toFixed(1)}</td>
                         <td style={{ ...numTd, fontWeight: 600 }}>
@@ -941,7 +1002,7 @@ export default function InventoryDashboard() {
               <br />• แบบระบุรับ-จ่ายตรง: date, sku, name, unit, in, out
               <br />• แบบตัวเลขคงเหลือต่อวัน: date, sku, name, unit, quantity (ระบบจะเทียบกับยอดครั้งก่อนของ SKU เดียวกัน — ตัวเลขลดลง = เบิกจ่าย, เพิ่มขึ้น = รับเข้า)
               <br />รองรับหัวคอลัมน์แบบระบบ ERP/SAP ด้วย เช่น Material Number, Material Description, Available Qty, Basic Unit of Measure
-              <br />คอลัมน์เสริม: leadTimeDays, safetyStock, note (รองรับทั้งชื่อภาษาไทยและอังกฤษ)
+              <br />คอลัมน์เสริม: leadTimeDays, safetyStock, note, Quantity on PO(Receive) [PO ที่กำลังจะเข้า], Issue Reserved Quantity [ยอดจองไว้จะจ่าย] — ใช้คำนวณความเพียงพอร่วมกับพยากรณ์ (รองรับทั้งชื่อภาษาไทยและอังกฤษ)
             </div>
 
             <div
